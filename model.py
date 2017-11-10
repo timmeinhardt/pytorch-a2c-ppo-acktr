@@ -4,6 +4,9 @@ import torch.nn.functional as F
 from running_stat import ObsNorm
 from distributions import Categorical, DiagGaussian
 
+def column_normalized(data):
+    data.normal_(0, 1)
+    data *= 1 / torch.sqrt(data.pow(2).sum(1, keepdim=True))
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -17,42 +20,49 @@ class FFPolicy(nn.Module):
     def __init__(self):
         super(FFPolicy, self).__init__()
 
-    def forward(self, x):
+    def forward(self, inputs, masks):
         raise NotImplementedError
 
-    def act(self, inputs, deterministic=False):
-        value, x = self(inputs)
+    def act(self, inputs, states, masks, deterministic=False):
+        value, x, states = self(inputs, states, masks)
         action = self.dist.sample(x, deterministic=deterministic)
-        return value, action
+        return value, action, states
 
-    def evaluate_actions(self, inputs, actions):
-        value, x = self(inputs)
+    def evaluate_actions(self, inputs, states, actions, masks):
+        value, x, states = self(inputs, states, masks)
         action_log_probs, dist_entropy = self.dist.logprobs_and_entropy(x, actions)
         return value, action_log_probs, dist_entropy
 
 
 class CNNPolicy(FFPolicy):
-    def __init__(self, num_inputs, action_space):
+    def __init__(self, num_inputs, action_space, recurrent):
         super(CNNPolicy, self).__init__()
         self.conv1 = nn.Conv2d(num_inputs, 32, 8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
         self.conv3 = nn.Conv2d(64, 32, 3, stride=1)
 
-        self.linear1 = nn.Linear(32 * 7 * 7, 512)
+        self.linear1 = nn.Linear(32 * 7 * 7, 256)
 
-        self.critic_linear = nn.Linear(512, 1)
+        if recurrent:
+            self.lstm = nn.GRUCell(256, 256)
+
+        self.critic_linear = nn.Linear(256, 1)
 
         if action_space.__class__.__name__ == "Discrete":
             num_outputs = action_space.n
-            self.dist = Categorical(512, num_outputs)
+            self.dist = Categorical(256, num_outputs)
         elif action_space.__class__.__name__ == "Box":
             num_outputs = action_space.shape[0]
-            self.dist = DiagGaussian(512, num_outputs)
+            self.dist = DiagGaussian(256, num_outputs)
         else:
             raise NotImplementedError
 
         self.train()
         self.reset_parameters()
+
+    @property
+    def state_size(self):
+        return 256
 
     def reset_parameters(self):
         self.apply(weights_init)
@@ -63,10 +73,16 @@ class CNNPolicy(FFPolicy):
         self.conv3.weight.data.mul_(relu_gain)
         self.linear1.weight.data.mul_(relu_gain)
 
+        if hasattr(self, 'lstm'):
+            nn.init.orthogonal(self.lstm.weight_ih.data)
+            nn.init.orthogonal(self.lstm.weight_hh.data)
+            self.lstm.bias_ih.data.fill_(0)
+            self.lstm.bias_hh.data.fill_(0)
+
         if self.dist.__class__.__name__ == "DiagGaussian":
             self.dist.fc_mean.weight.data.mul_(0.01)
 
-    def forward(self, inputs):
+    def forward(self, inputs, states, masks):
         x = self.conv1(inputs / 255.0)
         x = F.relu(x)
 
@@ -77,17 +93,31 @@ class CNNPolicy(FFPolicy):
         x = F.relu(x)
 
         x = x.view(-1, 32 * 7 * 7)
+
         x = self.linear1(x)
         x = F.relu(x)
 
-        return self.critic_linear(x), x
+        if hasattr(self, 'lstm'):
+            if x.size(0) == states.size(0):
+                x = states = self.lstm(x, states * masks)
+            else:
+                batch_size = states.size(0)
+                x = x.view(-1, batch_size, x.size(-1))
+                masks = masks.view(-1, batch_size, 1)
+                outputs = []
+                for i in range(x.size(0)):
+                    states = self.lstm(x[i], states * masks[i])
+                    outputs.append(states)
+
+                x = torch.cat(outputs, 0)
+
+        return self.critic_linear(x), x, states
 
 
 def weights_init_mlp(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
-        m.weight.data.normal_(0, 1)
-        m.weight.data *= 1 / torch.sqrt(m.weight.data.pow(2).sum(1, keepdim=True))
+        column_normalized(m.weight.data)
         if m.bias is not None:
             m.bias.data.fill_(0)
 
@@ -132,7 +162,7 @@ class MLPPolicy(FFPolicy):
         if self.dist.__class__.__name__ == "DiagGaussian":
             self.dist.fc_mean.weight.data.mul_(0.01)
 
-    def forward(self, inputs):
+    def forward(self, inputs, states, masks):
         inputs.data = self.obs_filter(inputs.data)
 
         x = self.v_fc1(inputs)
@@ -150,4 +180,4 @@ class MLPPolicy(FFPolicy):
         x = self.a_fc2(x)
         x = F.tanh(x)
 
-        return value, x
+        return value, x, states

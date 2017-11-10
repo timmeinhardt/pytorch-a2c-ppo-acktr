@@ -61,9 +61,9 @@ def main():
     obs_shape = (obs_shape[0] * args.num_stack, *obs_shape[1:])
 
     if len(envs.observation_space.shape) == 3:
-        actor_critic = CNNPolicy(obs_shape[0], envs.action_space)
+        actor_critic = CNNPolicy(obs_shape[0], envs.action_space, args.recurrent_policy)
     else:
-        actor_critic = MLPPolicy(obs_shape[0], envs.action_space)
+        actor_critic = MLPPolicy(obs_shape[0], envs.action_space, args.recurrent_policy)
 
     if envs.action_space.__class__.__name__ == "Discrete":
         action_shape = 1
@@ -75,12 +75,13 @@ def main():
 
     if args.algo == 'a2c':
         optimizer = optim.RMSprop(actor_critic.parameters(), args.lr, eps=args.eps, alpha=args.alpha)
+        #optimizer = optim.Adam(actor_critic.parameters(), args.lr, eps=args.eps)
     elif args.algo == 'ppo':
         optimizer = optim.Adam(actor_critic.parameters(), args.lr, eps=args.eps)
     elif args.algo == 'acktr':
         optimizer = KFACOptimizer(actor_critic)
 
-    rollouts = RolloutStorage(args.num_steps, args.num_processes, obs_shape, envs.action_space)
+    rollouts = RolloutStorage(args.num_steps, args.num_processes, obs_shape, envs.action_space, actor_critic.state_size)
     current_obs = torch.zeros(args.num_processes, *obs_shape)
 
     def update_current_obs(obs):
@@ -110,7 +111,9 @@ def main():
     for j in range(num_updates):
         for step in range(args.num_steps):
             # Sample actions
-            value, action = actor_critic.act(Variable(rollouts.observations[step], volatile=True))
+            value, action, new_state = actor_critic.act(Variable(rollouts.observations[step], volatile=True),
+                                                        Variable(rollouts.states[step], volatile=True),
+                                                        Variable(rollouts.masks[step], volatile=True))
             cpu_actions = action.data.squeeze(1).cpu().numpy()
 
             # Obser reward and next obs
@@ -133,9 +136,11 @@ def main():
                 current_obs *= masks
 
             update_current_obs(obs)
-            rollouts.insert(step, current_obs, action.data, value.data, reward, masks)
+            rollouts.insert(step, current_obs, new_state.data, action.data, value.data, reward, masks)
 
-        next_value = actor_critic(Variable(rollouts.observations[-1], volatile=True))[0].data
+        next_value = actor_critic(Variable(rollouts.observations[-1], volatile=True),
+                                  Variable(rollouts.states[-1], volatile=True),
+                                  Variable(rollouts.masks[-1], volatile=True))[0].data
 
         if hasattr(actor_critic, 'obs_filter'):
             actor_critic.obs_filter.update(rollouts.observations[:-1].view(-1, *obs_shape))
@@ -143,7 +148,10 @@ def main():
         rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau)
 
         if args.algo in ['a2c', 'acktr']:
-            values, action_log_probs, dist_entropy = actor_critic.evaluate_actions(Variable(rollouts.observations[:-1].view(-1, *obs_shape)), Variable(rollouts.actions.view(-1, action_shape)))
+            values, action_log_probs, dist_entropy = actor_critic.evaluate_actions(Variable(rollouts.observations[:-1].view(-1, *obs_shape)),
+                                                                                   Variable(rollouts.states[0]),
+                                                                                   Variable(rollouts.actions.view(-1, action_shape)),
+                                                                                   Variable(rollouts.masks[:-1].view(-1, 1)))
 
             values = values.view(args.num_steps, args.num_processes, 1)
             action_log_probs = action_log_probs.view(args.num_steps, args.num_processes, 1)
@@ -210,7 +218,7 @@ def main():
                     (value_loss + action_loss - dist_entropy * args.entropy_coef).backward()
                     optimizer.step()
 
-        rollouts.observations[0].copy_(rollouts.observations[-1])
+        rollouts.end_rollout()
 
         if j % args.save_interval == 0 and args.save_dir != "":
             save_path = os.path.join(args.save_dir, args.algo)
