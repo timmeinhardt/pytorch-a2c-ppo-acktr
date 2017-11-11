@@ -4,6 +4,33 @@ import torch.nn.functional as F
 from running_stat import ObsNorm
 from distributions import Categorical, DiagGaussian
 
+
+def orthogonal(tensor, gain=1):
+    if tensor.ndimension() < 2:
+        raise ValueError("Only tensors with 2 or more dimensions are supported")
+
+    rows = tensor.size(0)
+    cols = tensor[0].numel()
+    flattened = torch.Tensor(rows, cols).normal_(0, 1)
+
+    if rows < cols:
+        flattened.t_()
+
+    # Compute the qr factorization
+    q, r = torch.qr(flattened)
+    # Make Q uniform according to https://arxiv.org/pdf/math-ph/0609050.pdf
+    d = torch.diag(r, 0)
+    ph = d.sign()
+    q *= ph.expand_as(q)
+
+    if rows < cols:
+        q.t_()
+
+    tensor.view_as(q).copy_(q)
+    tensor.mul_(gain)
+    return tensor
+
+
 def column_normalized(data):
     data.normal_(0, 1)
     data *= 1 / torch.sqrt(data.pow(2).sum(1, keepdim=True))
@@ -11,7 +38,7 @@ def column_normalized(data):
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1 or classname.find('Linear') != -1:
-        nn.init.orthogonal(m.weight.data)
+        orthogonal(m.weight.data)
         if m.bias is not None:
             m.bias.data.fill_(0)
 
@@ -74,8 +101,8 @@ class CNNPolicy(FFPolicy):
         self.linear1.weight.data.mul_(relu_gain)
 
         if hasattr(self, 'lstm'):
-            nn.init.orthogonal(self.lstm.weight_ih.data)
-            nn.init.orthogonal(self.lstm.weight_hh.data)
+            orthogonal(self.lstm.weight_ih.data)
+            orthogonal(self.lstm.weight_hh.data)
             self.lstm.bias_ih.data.fill_(0)
             self.lstm.bias_hh.data.fill_(0)
 
@@ -83,7 +110,8 @@ class CNNPolicy(FFPolicy):
             self.dist.fc_mean.weight.data.mul_(0.01)
 
     def forward(self, inputs, states, masks):
-        x = self.conv1(inputs / 255.0)
+        inputs = inputs / 255.0
+        x = self.conv1(inputs)
         x = F.relu(x)
 
         x = self.conv2(x)
