@@ -32,10 +32,9 @@ class PPO():
         self.optimizer = optim.Adam(actor_critic.parameters(), lr=lr, eps=eps)
 
     def update(self, rollouts, zero_grad_and_step=True):
-        advantages = reversed(rollouts.returns - rollouts.value_preds)
-        advantages = (advantages - advantages.mean()) / (
-            advantages.std() + 1e-5)
-
+        advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
+        #advantages = (advantages - advantages.mean()) / (
+        #    advantages.std() + 1e-5)
         value_loss_epoch = action_loss_epoch = dist_entropy_epoch = 0
 
         for e in range(self.epochs):
