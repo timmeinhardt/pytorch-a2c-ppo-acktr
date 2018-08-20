@@ -68,9 +68,7 @@ class A2C_ACKTR():
 
         self.optimizer.zero_grad()
 
-        value_loss *= self.value_loss_coef
-        dist_entropy *= self.entropy_coef
-        (value_loss + action_loss - dist_entropy).backward()
+        (value_loss * self.value_loss_coef + action_loss - dist_entropy * self.entropy_coef).backward()
 
         if self.acktr == False:
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
