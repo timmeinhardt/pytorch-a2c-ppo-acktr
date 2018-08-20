@@ -7,11 +7,11 @@ import torch.optim as optim
 class PPO():
     def __init__(self,
                  actor_critic,
-                 clip_param,
-                 ppo_epoch,
-                 num_mini_batch,
                  value_loss_coef,
                  entropy_coef,
+                 clip_param,
+                 epochs,
+                 num_mini_batches,
                  lr=None,
                  eps=None,
                  max_grad_norm=None,
@@ -20,8 +20,8 @@ class PPO():
         self.actor_critic = actor_critic
 
         self.clip_param = clip_param
-        self.ppo_epoch = ppo_epoch
-        self.num_mini_batch = num_mini_batch
+        self.epochs = epochs
+        self.num_mini_batches = num_mini_batches
 
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
@@ -31,22 +31,20 @@ class PPO():
 
         self.optimizer = optim.Adam(actor_critic.parameters(), lr=lr, eps=eps)
 
-    def update(self, rollouts):
-        advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
+    def update(self, rollouts, zero_grad_and_step=True):
+        advantages = reversed(rollouts.returns - rollouts.value_preds)
         advantages = (advantages - advantages.mean()) / (
             advantages.std() + 1e-5)
 
-        value_loss_epoch = 0
-        action_loss_epoch = 0
-        dist_entropy_epoch = 0
+        value_loss_epoch = action_loss_epoch = dist_entropy_epoch = 0
 
-        for e in range(self.ppo_epoch):
-            if self.actor_critic.is_recurrent:
+        for e in range(self.epochs):
+            if self.actor_critic.base.is_recurrent:
                 data_generator = rollouts.recurrent_generator(
-                    advantages, self.num_mini_batch)
+                    advantages, self.num_mini_batches)
             else:
                 data_generator = rollouts.feed_forward_generator(
-                    advantages, self.num_mini_batch)
+                    advantages, self.num_mini_batches)
 
             for sample in data_generator:
                 obs_batch, recurrent_hidden_states_batch, actions_batch, \
@@ -73,21 +71,23 @@ class PPO():
                 else:
                     value_loss = 0.5 * (return_batch - values).pow(2).mean()
 
-                self.optimizer.zero_grad()
+                if zero_grad_and_step:
+                    self.optimizer.zero_grad()
 
                 value_loss *= self.value_loss_coef
                 dist_entropy *= self.entropy_coef
                 (value_loss + action_loss - dist_entropy).backward()
 
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
-                                         self.max_grad_norm)
-                self.optimizer.step()
+                if zero_grad_and_step:
+                    nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
+                                             self.max_grad_norm)
+                    self.optimizer.step()
 
                 value_loss_epoch += value_loss.item()
                 action_loss_epoch += action_loss.item()
                 dist_entropy_epoch += dist_entropy.item()
 
-        num_updates = self.ppo_epoch * self.num_mini_batch
+        num_updates = self.epochs * self.num_mini_batches
 
         value_loss_epoch /= num_updates
         action_loss_epoch /= num_updates
