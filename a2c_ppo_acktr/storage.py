@@ -9,7 +9,7 @@ def _flatten_helper(T, N, _tensor):
 class RolloutStorage(object):
     def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size):
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
-        self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
+        self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, action_space.num_actions, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
         self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
         self.returns = torch.zeros(num_steps + 1, num_processes, 1)
@@ -18,11 +18,12 @@ class RolloutStorage(object):
             action_shape = 1
         else:
             action_shape = action_space.shape[0]
-        self.actions = torch.zeros(num_steps, num_processes, action_shape)
+        self.actions = torch.zeros(num_steps, num_processes, action_space.num_actions, action_shape)
         if action_space.__class__.__name__ == 'Discrete':
             self.actions = self.actions.long()
         self.masks = torch.ones(num_steps + 1, num_processes, 1)
 
+        self.action_space = action_space
         self.num_steps = num_steps
         self.step = 0
 
@@ -131,7 +132,8 @@ class RolloutStorage(object):
             adv_targ = torch.stack(adv_targ, 1)
 
             # States is just a (N, -1) tensor
-            recurrent_hidden_states_batch = torch.stack(recurrent_hidden_states_batch, 1).view(N, -1)
+            recurrent_hidden_states_batch = torch.stack(recurrent_hidden_states_batch, 1)
+            recurrent_hidden_states_batch = recurrent_hidden_states_batch.view(N, *recurrent_hidden_states_batch.size()[2:])
 
             # Flatten the (T, N, ...) tensors to (T * N, ...)
             obs_batch = _flatten_helper(T, N, obs_batch)
