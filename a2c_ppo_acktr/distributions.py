@@ -25,7 +25,6 @@ FixedCategorical.log_probs = lambda self, actions: log_prob_cat(self, actions.sq
 
 FixedCategorical.mode = lambda self: self.probs.argmax(dim=-1, keepdim=True)
 
-
 # Normal
 FixedNormal = torch.distributions.Normal
 
